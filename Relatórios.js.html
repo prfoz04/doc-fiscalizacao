@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: Relatórios.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+        <link rel="icon" type="image/x-icon" href="styles/icone.ico">
+
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: Relatórios.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>/**
+ * @file Relatórios.js
+ * @description
+ *
+ * SCRIPT PARA AUTOMATIZAR A GERAÇÃO DE RELATÓRIOS INDIVIDUAIS EM PDF.
+ *
+ * Funcionalidades:
+ * 1. Cria um menu customizado ("Relatórios") na própria planilha.
+ * 2. Inicia um processo em segundo plano para gerar relatórios da aba ativa,
+ * evitando timeouts de execução.
+ * 3. Processa os dados em lotes usando gatilhos de tempo para continuar de onde parou.
+ * 4. Para cada processo, gera um relatório PDF principal e um relatório PSC adicional se o link existir.
+ * 5. Salva os arquivos na pasta do Google Drive correspondente (JF ou JS).
+ * 6. Envia um email de notificação ao final do processo completo, com detalhes dos erros.
+ * 7. Permite o cancelamento manual do processo em andamento.
+ */
+
+// ------------------- CONFIGURAÇÃO OBRIGATÓRIA -------------------
+const CONFIG = {
+  WEB_APP_URL: "https://script.google.com/macros/s/AKfycbxH4GeMfR5z0deOlwgFOpvlEY9LLKAzj921hYuEOgM4pt-oc7ce5sviMQxhqnzMP914/exec",
+  DRIVE_FOLDER_IDS: {
+    'JF': '1hUqDHBBHGKtfhIQqz3tHVFyaXiKuQ0t4',
+    'JS': '10x-_Ns7l3JMQHg0zKql_ZDjCNT__SX8e'
+  }
+};
+// --------------------------------------------------------------------
+
+// Chaves para salvar o estado do processo entre execuções
+const SCRIPT_PROPERTIES = {
+  SHEET_NAME: 'process_sheet_name',
+  CURRENT_ROW: 'process_current_row',
+  SUCCESS_COUNT: 'process_success_count',
+  FAIL_COUNT: 'process_fail_count',
+  FAIL_DETAILS: 'process_fail_details' // Novo: para guardar os detalhes dos erros
+};
+
+
+
+/**
+ * Ponto de entrada chamado pelo menu. Configura o estado inicial e cria o gatilho.
+ *
+ * @returns {void}
+ */
+function iniciarProcessamento() {
+  const ui = SpreadsheetApp.getUi();
+  const activeSheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  const sheetName = activeSheet.getName();
+
+  const response = ui.alert(
+    'Confirmação',
+    `Deseja iniciar a geração de relatórios em segundo plano para a aba "${sheetName}"? \n\nVocê será notificado por email ao final.`,
+    ui.ButtonSet.YES_NO
+  );
+
+  if (response == ui.Button.YES) {
+    // Limpa qualquer processo anterior antes de iniciar um novo
+    pararEresetarProcessamento();
+
+    const userProperties = PropertiesService.getUserProperties();
+    userProperties.setProperties({
+      [SCRIPT_PROPERTIES.SHEET_NAME]: sheetName,
+      [SCRIPT_PROPERTIES.CURRENT_ROW]: 2, // Começa da linha 2
+      [SCRIPT_PROPERTIES.SUCCESS_COUNT]: 0,
+      [SCRIPT_PROPERTIES.FAIL_COUNT]: 0,
+      [SCRIPT_PROPERTIES.FAIL_DETAILS]: JSON.stringify([]) // Inicia a lista de erros vazia
+    });
+
+    // Cria um gatilho para rodar a função de processamento a cada 5 minutos
+    ScriptApp.newTrigger('processarLoteDeRelatorios')
+      .timeBased()
+      .everyMinutes(5) // Intervalo aumentado para evitar sobreposição
+      .create();
+
+    SpreadsheetApp.getActiveSpreadsheet().toast('O processamento foi iniciado em segundo plano. Pode fechar a planilha se desejar.', 'Processo Iniciado', 10);
+  } else {
+    SpreadsheetApp.getActiveSpreadsheet().toast('Operação cancelada.', 'Cancelado', 5);
+  }
+}
+
+
+/**
+ * Deleta os gatilhos e limpa as propriedades salvas. Chamado ao final ou para cancelar.
+ *
+ * @param {boolean} jobFinished Indica se o processo terminou e deve disparar o e-mail de conclusão.
+ * @returns {void}
+ */
+function pararEresetarProcessamento(jobFinished = false) {
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'processarLoteDeRelatorios') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  }
+  
+  const userProperties = PropertiesService.getUserProperties();
+  const props = userProperties.getProperties();
+
+  if (jobFinished &amp;&amp; props[SCRIPT_PROPERTIES.SHEET_NAME]) {
+      const sheetName = props[SCRIPT_PROPERTIES.SHEET_NAME];
+      const success = props[SCRIPT_PROPERTIES.SUCCESS_COUNT];
+      const fails = props[SCRIPT_PROPERTIES.FAIL_COUNT];
+      const failDetails = JSON.parse(props[SCRIPT_PROPERTIES.FAIL_DETAILS] || '[]');
+      const userEmail = Session.getActiveUser().getEmail();
+
+      const subject = `Geração de Relatórios Concluída: Aba "${sheetName}"`;
+      let body = `O processo de geração de relatórios foi concluído.\n\n` +
+                   `Resumo para a aba "${sheetName}":\n` +
+                   `- Relatórios gerados com sucesso: ${success}\n` +
+                   `- Falhas: ${fails}`;
+      
+      // Adiciona os detalhes dos erros ao corpo do email, se houver
+      if (failDetails.length > 0) {
+          body += `\n\nDetalhes das falhas:\n- ${failDetails.join('\n- ')}`;
+      }
+      
+      MailApp.sendEmail(userEmail, subject, body);
+      SpreadsheetApp.getActiveSpreadsheet().toast('Processo concluído! Um email de resumo foi enviado.');
+  } else if (!jobFinished) { // Só mostra o toast de cancelamento se não for o fim do trabalho
+      SpreadsheetApp.getActiveSpreadsheet().toast('Processamento em segundo plano foi cancelado.');
+  }
+
+  // Limpa todas as propriedades
+  userProperties.deleteProperty(SCRIPT_PROPERTIES.SHEET_NAME);
+  userProperties.deleteProperty(SCRIPT_PROPERTIES.CURRENT_ROW);
+  userProperties.deleteProperty(SCRIPT_PROPERTIES.SUCCESS_COUNT);
+  userProperties.deleteProperty(SCRIPT_PROPERTIES.FAIL_COUNT);
+  userProperties.deleteProperty(SCRIPT_PROPERTIES.FAIL_DETAILS);
+}
+
+
+/**
+ * Função executada pelo gatilho. Processa um lote de linhas por vez.
+ *
+ * @returns {void}
+ */
+function processarLoteDeRelatorios() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) {
+    Logger.log('Execução simultânea evitada. Outro processo já está em andamento.');
+    return;
+  }
+
+  try {
+    const userProperties = PropertiesService.getUserProperties();
+    const props = userProperties.getProperties();
+
+    const sheetName = props[SCRIPT_PROPERTIES.SHEET_NAME];
+    let currentRow = parseInt(props[SCRIPT_PROPERTIES.CURRENT_ROW]);
+    let successCount = parseInt(props[SCRIPT_PROPERTIES.SUCCESS_COUNT]);
+    let failCount = parseInt(props[SCRIPT_PROPERTIES.FAIL_COUNT]);
+    let failDetails = JSON.parse(props[SCRIPT_PROPERTIES.FAIL_DETAILS] || '[]');
+
+    if (!sheetName) {
+      pararEresetarProcessamento();
+      return;
+    }
+
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+    if (!sheet) {
+      Logger.log(`Aba "${sheetName}" não encontrada. Interrompendo processo.`);
+      pararEresetarProcessamento();
+      return;
+    }
+    
+    const lastRow = sheet.getLastRow();
+    const startTime = new Date();
+    const timeLimit = new Date(startTime.getTime() + 4 * 60 * 1000); 
+
+    while (new Date() &lt; timeLimit &amp;&amp; currentRow &lt;= lastRow) {
+      const [tipoJustica, processo] = sheet.getRange(currentRow, 3, 1, 2).getValues()[0];
+      
+      if (tipoJustica &amp;&amp; processo) {
+          const folderId = CONFIG.DRIVE_FOLDER_IDS[tipoJustica.toString().toUpperCase().trim()];
+          if (!folderId) {
+              const errorMsg = `Tipo de justiça inválido para o processo ${processo} na linha ${currentRow}`;
+              Logger.log(errorMsg);
+              failCount++;
+              failDetails.push(errorMsg);
+          } else {
+              const dados = fetchDadosDoProcesso(processo.toString().trim());
+              if (dados &amp;&amp; dados.ignorado) {
+                Logger.log(`Processo ${processo} ignorado devido a: ${dados.motivo}`)
+              } 
+              else if (dados &amp;&amp; !dados.erro) {
+                  const nomeBase = `${processo} - Relatorio da Situacao Processual Executoria`;
+                  const html = criarHtmlDoRelatorio(dados);
+                  if (salvarRelatorioComoPDF(html, nomeBase, folderId)) {
+                      successCount++;
+                      if (dados.relatorio &amp;&amp; typeof dados.relatorio === 'string' &amp;&amp; dados.relatorio.startsWith('http')) {
+                          salvarPdfDoLink(dados.relatorio, processo, folderId);
+                      }
+                  } else {
+                      const errorMsg = `Falha ao salvar PDF para o processo ${processo} na linha ${currentRow}`;
+                      Logger.log(errorMsg);
+                      failCount++;
+                      failDetails.push(errorMsg);
+                  }
+              } else {
+                  const errorMsg = `Erro ao buscar dados para o processo ${processo} na linha ${currentRow}.`;
+                  Logger.log(errorMsg);
+                  failCount++;
+                  failDetails.push(errorMsg);
+              }
+          }
+      }
+      currentRow++;
+      Utilities.sleep(1000);
+    }
+    
+    userProperties.setProperties({
+      [SCRIPT_PROPERTIES.CURRENT_ROW]: currentRow,
+      [SCRIPT_PROPERTIES.SUCCESS_COUNT]: successCount,
+      [SCRIPT_PROPERTIES.FAIL_COUNT]: failCount,
+      [SCRIPT_PROPERTIES.FAIL_DETAILS]: JSON.stringify(failDetails)
+    });
+
+    if (currentRow > lastRow) {
+      Logger.log('Processamento concluído. Todas as linhas foram processadas.');
+      pararEresetarProcessamento(true);
+    } else {
+      Logger.log(`Lote processado. Parou na linha ${currentRow - 1}. Próxima execução continuará da linha ${currentRow}.`);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+
+// --- DEMAIS FUNÇÕES (sem alterações significativas) ---
+
+/**
+ * Cria o corpo HTML, converte para um Blob PDF e salva no Google Drive.
+ *
+ * @param {string} htmlContent Conteúdo HTML do relatório a ser convertido em PDF.
+ * @param {string} baseFileName Nome base do arquivo PDF a ser salvo.
+ * @param {string} folderId ID da pasta do Google Drive onde o PDF será armazenado.
+ * @returns {boolean} Retorna true quando o PDF for salvo com sucesso e false em caso de erro.
+ */
+function salvarRelatorioComoPDF(htmlContent, baseFileName, folderId) {
+  try {
+    const pastaDestino = DriveApp.getFolderById(folderId);
+    const nomeArquivoPDF = `${baseFileName}.pdf`;
+    const corpoHtmlCompleto = `
+    &lt;!DOCTYPE html>&lt;html>&lt;head>&lt;title>${baseFileName}&lt;/title>&lt;style>
+    body { font-family: Arial, sans-serif; margin: 2cm; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+    td { border: 1px solid #dddddd; text-align: left; padding: 8px; }
+    td:first-child { font-weight: bold; background-color: #f2f2f2; width: 30%; }
+    h1, h2, h3 { color: #333; }
+    &lt;/style>&lt;/head>&lt;body>${htmlContent}&lt;/body>&lt;/html>`;
+
+    const arquivosExistentes = pastaDestino.getFilesByName(nomeArquivoPDF);
+    if (arquivosExistentes.hasNext()) {
+      arquivosExistentes.next().setTrashed(true);
+    }
+    const blobHtml = Utilities.newBlob(corpoHtmlCompleto, MimeType.HTML, `${baseFileName}.html`);
+    const pdfBlob = blobHtml.getAs(MimeType.PDF);
+    pastaDestino.createFile(pdfBlob).setName(nomeArquivoPDF);
+    return true; // Sucesso
+  } catch (e) {
+    Logger.log(`ERRO GRAVE no Drive ao salvar o relatório principal para "${baseFileName}". Verifique se o ID da pasta "${folderId}" está correto e se o script tem permissão. Erro: ${e.toString()}`);
+    return false; // Falha
+  }
+}
+
+/**
+ * Baixa um PDF de uma URL de exportação do Google Sheets e o salva no Google Drive.
+ *
+ * @param {string} url URL do PDF a ser baixado.
+ * @param {string} processo Número ou identificador do processo associado ao relatório.
+ * @param {string} folderId ID da pasta do Google Drive onde o arquivo será salvo.
+ * @returns {void}
+ */
+function salvarPdfDoLink(url, processo, folderId) {
+  try {
+    const nomeArquivo = `${processo} - Relatorio de Acompanhamento - PSC.pdf`;
+    const response = UrlFetchApp.fetch(url, { headers: { 'Authorization': 'Bearer ' + ScriptApp.getOAuthToken() } });
+    const pdfBlob = response.getBlob().setName(nomeArquivo);
+    const pastaDestino = DriveApp.getFolderById(folderId);
+    const arquivosExistentes = pastaDestino.getFilesByName(nomeArquivo);
+    if (arquivosExistentes.hasNext()) {
+      arquivosExistentes.next().setTrashed(true);
+    }
+    pastaDestino.createFile(pdfBlob);
+    Logger.log(`Relatório de Acompanhamento PSC para o processo ${processo} salvo com sucesso.`);
+  } catch (e) {
+    Logger.log(`Falha ao baixar ou salvar o PDF do link PSC para o processo ${processo}. Verifique o link e as permissões da pasta. Erro: ${e.toString()}`);
+  }
+}
+
+/**
+ * Busca os dados de um processo específico chamando o Web App.
+ *
+ * @param {string} processo Número ou identificador do processo a ser consultado.
+ * @returns {Object|null} Objeto com os dados do processo, ou null em caso de erro.
+ */
+function fetchDadosDoProcesso(processo) {
+  try {
+    const url = `${CONFIG.WEB_APP_URL}?processo=${encodeURIComponent(processo)}`;
+    const resposta = UrlFetchApp.fetch(url, { muteHttpExceptions: true, "headers": { "Cache-Control": "no-cache" } });
+    if (resposta.getResponseCode() == 200) {
+      return JSON.parse(resposta.getContentText());
+    } else {
+      Logger.log(`Erro na chamada HTTP para o processo ${processo}: Código ${resposta.getResponseCode()}`);
+      return { erro: `Erro na chamada HTTP: ${resposta.getResponseCode()}` };
+    }
+  } catch (e) {
+    Logger.log(`Erro ao buscar dados para o processo ${processo}: ${e.message}`);
+    return null;
+  }
+}
+
+// --- Funções de formatação de dados ---
+/**
+ * Verifica se um valor está vazio.
+ *
+ * @param {*} valor Valor a ser avaliado.
+ * @returns {boolean} Retorna true quando o valor é null, undefined ou string vazia.
+ */
+function isValorVazio(valor) { return valor === null || valor === undefined || valor === ''; }
+/**
+ * Formata um valor numérico para moeda em formato brasileiro.
+ *
+ * @param {number|string|null|undefined} valor Valor a ser formatado.
+ * @returns {string} Valor formatado como moeda com duas casas decimais.
+ */
+function formatarMoeda(valor) { if (isValorVazio(valor)) return '0,00'; const numero = typeof valor === 'number' ? valor : parseFloat(String(valor).replace(',', '.')); if (isNaN(numero)) return valor; return numero.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });}
+/**
+ * Formata uma data em formato ISO para dd/MM/yyyy.
+ *
+ * @param {string|null|undefined} isoString Data em formato ISO ou string compatível.
+ * @returns {string} Data formatada ou a string original em caso de falha.
+ */
+function formatarData(isoString) { if (isValorVazio(isoString)) return ''; try { const data = new Date(isoString); return Utilities.formatDate(data, Session.getScriptTimeZone(), "dd/MM/yyyy"); } catch (e) { return isoString; } }
+/**
+ * Converte uma data para um valor de duração em horas e minutos.
+ *
+ * @param {string|Date} dateString Data a ser convertida.
+ * @returns {string} Texto no formato HH:MM.
+ */
+function formatDurationFromDate(dateString) { try { const baseDate = new Date("1899-12-30T00:00:00Z"); const d = new Date(dateString); const diffMs = d.getTime() - baseDate.getTime(); const offsetSeconds = 11188; let totalSeconds = Math.floor(diffMs / 1000) - offsetSeconds; if (totalSeconds &lt; 0) totalSeconds = 0; const hours = Math.floor(totalSeconds / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`; } catch(e) { return dateString; } }
+/**
+ * Capitaliza a primeira letra de uma string.
+ *
+ * @param {string} string Texto a ser formatado.
+ * @returns {string} Texto com a primeira letra em maiúscula.
+ */
+function capitalizeFirstLetter(string) { if (!string) return ''; return string.charAt(0).toUpperCase() + string.slice(1); }
+
+// --- Funções de criação do HTML ---
+/**
+ * Renderiza uma linha de tabela HTML para um campo do relatório.
+ *
+ * @param {string} chave Nome da chave do dado a ser exibido.
+ * @param {*} valor Valor associado à chave.
+ * @param {Object} data Objeto contendo os dados do processo.
+ * @returns {string} String HTML contendo a linha da tabela.
+ */
+function renderLinhaParaTabela(chave, valor, data) {
+  const nomesAmigaveis = { processo: "Processo", nome: "Nome", entidade: "Entidade", saldo: "Saldo", penaOriginaria: "Pena Originária", penaPP: "Pena", contas: "Nº Contas", dataPP: "Consulta", juizo: "Juízo", classe: "Classe", relatorio: "Relatório", pena: "Pena", executado: "Executado", parcela: "Parcela", conta: "Conta" };
+  let valorFormatado = valor;
+  if (chave === 'executado' &amp;&amp; (data.entidade === "Conselho da Comunidade - Cascavel" || data.entidade === "Conselho da Comunidade - Pato Branco")) { valorFormatado = "SEEU"; } else if ((chave === 'pena' || chave === 'executado') &amp;&amp; typeof valor === 'string') { valorFormatado = formatDurationFromDate(valor); } else if (chave === 'saldo' || chave === 'penaPP') { valorFormatado = formatarMoeda(valor); } else if (chave === 'dataPP' &amp;&amp; valor) { valorFormatado = formatarData(valor); } else if (typeof valor === 'string' &amp;&amp; valor.startsWith('http')) { valorFormatado = `&lt;a href="${valor}" target="_blank">Clique aqui&lt;/a>`; } else if (chave === 'juizo') { valorFormatado = valor === 'JS' ? 'Aberto Substituto' : valor === 'JF' ? 'Aberto Federal' : valor; }
+  const nomeExibicao = nomesAmigaveis[chave] || capitalizeFirstLetter(chave);
+  return `&lt;tr>&lt;td>${nomeExibicao}&lt;/td>&lt;td>${valorFormatado}&lt;/td>&lt;/tr>`;
+}
+/**
+ * Cria o HTML completo do relatório a partir dos dados do processo.
+ *
+ * @param {Object} data Objeto contendo os dados do processo.
+ * @returns {string} HTML do relatório formatado.
+ */
+function criarHtmlDoRelatorio(data) {
+  const bloco1 = ['juizo', 'classe', 'processo', 'nome'];
+  const bloco2 = ['pena', 'entidade', 'executado', 'relatorio'];
+  const bloco3 = ['penaPP','saldo', 'parcela', 'conta', 'dataPP'];
+  let html = `&lt;h2>Relatório da Situação Processual Executória&lt;/h2>`;
+  html += gerarImpresso("Dados do Processo", bloco1, data);
+  html += gerarImpresso("Dados da PSC", bloco2, data);
+  html += gerarImpresso("Dados da PP", bloco3, data);
+  return html;
+}
+/**
+ * Gera o bloco HTML de uma seção específica do relatório.
+ *
+ * @param {string} titulo Título da seção exibida no relatório.
+ * @param {string[]} bloco Lista das chaves de dados a serem renderizadas.
+ * @param {Object} data Objeto contendo os dados do processo.
+ * @returns {string} HTML da seção formatada.
+ */
+function gerarImpresso(titulo, bloco, data) {
+  let linhas = '';
+  const isBloco3 = (bloco.includes('saldo'));
+  let outroValorNoBloco3Existe = false;
+  if (isBloco3) { outroValorNoBloco3Existe = bloco.filter(k => k !== 'saldo').some(key => data.hasOwnProperty(key) &amp;&amp; !isValorVazio(data[key])); }
+  for (const key of bloco) {
+    if (data.hasOwnProperty(key)) {
+      if (key === "relatorio" || key === "parcela" || key === "juizo" || key === "classe") continue; 
+      const valor = data[key];
+      if (key === 'saldo' &amp;&amp; isBloco3) {
+        if ((isValorVazio(valor) || valor === 0) &amp;&amp; outroValorNoBloco3Existe) { linhas += renderLinhaParaTabela(key, 0, data); } else if (!isValorVazio(valor)) { linhas += renderLinhaParaTabela(key, valor, data); }
+      } else {
+        if (!isValorVazio(valor)) { linhas += renderLinhaParaTabela(key, valor, data); }
+      }
+    }
+  }
+  if (linhas) { return `&lt;h3>${titulo}&lt;/h3>&lt;table>${linhas}&lt;/table>`; } else { return ''; }
+}
+
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Global</h3><ul><li><a href="global.html#capitalizeFirstLetter">capitalizeFirstLetter</a></li><li><a href="global.html#criarHtmlDoRelatorio">criarHtmlDoRelatorio</a></li><li><a href="global.html#fetchDadosDoProcesso">fetchDadosDoProcesso</a></li><li><a href="global.html#formatDurationFromDate">formatDurationFromDate</a></li><li><a href="global.html#formatarData">formatarData</a></li><li><a href="global.html#formatarMoeda">formatarMoeda</a></li><li><a href="global.html#gerarImpresso">gerarImpresso</a></li><li><a href="global.html#iniciarProcessamento">iniciarProcessamento</a></li><li><a href="global.html#isValorVazio">isValorVazio</a></li><li><a href="global.html#onOpen">onOpen</a></li><li><a href="global.html#pararEresetarProcessamento">pararEresetarProcessamento</a></li><li><a href="global.html#processarLoteDeRelatorios">processarLoteDeRelatorios</a></li><li><a href="global.html#renderLinhaParaTabela">renderLinhaParaTabela</a></li><li><a href="global.html#salvarPdfDoLink">salvarPdfDoLink</a></li><li><a href="global.html#salvarRelatorioComoPDF">salvarRelatorioComoPDF</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Jul 15 2026 16:52:02 GMT-0300 (Horário Padrão de Brasília)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>
