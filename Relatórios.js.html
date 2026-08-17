@@ -51,7 +51,19 @@ const CONFIG = {
   DRIVE_FOLDER_IDS: {
     'JF': '1hUqDHBBHGKtfhIQqz3tHVFyaXiKuQ0t4',
     'JS': '10x-_Ns7l3JMQHg0zKql_ZDjCNT__SX8e'
-  }
+  },
+  //novas pastas
+  DRIVE_FOLDER: {
+    EANPP: {
+      JF: '1xHaOZ4xR4o0qcmTywF9GM79rH1XgHmMG',
+      JS: '1QlctsK6OoJsUIoZvOfnYsnI5YjsDEj5A',
+    },
+    EP: {
+      JF: '1ggh9SBtsFuZWBeMnhikZL_t-kJZ5izw1',
+      JS: '1VzK7fAgD6KkUmPkuDG81S8Qt_ylfRUKa',
+    },
+  },
+  PLANILHA_PSC_LOTACAO: SpreadsheetApp.openById('1OpwOjfYiqPXH0324DGbYDHf9syDlPcS0uIBB771BmmY').getSheetByName('Lotação'),
 };
 // --------------------------------------------------------------------
 
@@ -64,12 +76,21 @@ const SCRIPT_PROPERTIES = {
   FAIL_DETAILS: 'process_fail_details' // Novo: para guardar os detalhes dos erros
 };
 
-
+/**
+ * precisa de uma funcao para buscar a classe porque a planilha atual nao possui essa informação
+ * @param {string} processo 
+ * @return {string} classe
+ */
+function buscarClasse(processo) {
+  const COLUNA_CLASSE = CONFIG.PLANILHA_PSC_LOTACAO.getRange('O:O').getValues().map(linha => linha[0]);
+  const COLUNA_PROCESSO = CONFIG.PLANILHA_PSC_LOTACAO.getRange('A:A').getValues().map(linha => linha[0]);
+  var index = COLUNA_PROCESSO.indexOf(processo);
+  var classe = COLUNA_CLASSE[index];
+  return classe ? (classe.includes('EANPP') ? 'EANPP' : 'EP') : 'EP';
+}
 
 /**
  * Ponto de entrada chamado pelo menu. Configura o estado inicial e cria o gatilho.
- *
- * @returns {void}
  */
 function iniciarProcessamento() {
   const ui = SpreadsheetApp.getUi();
@@ -110,9 +131,6 @@ function iniciarProcessamento() {
 
 /**
  * Deleta os gatilhos e limpa as propriedades salvas. Chamado ao final ou para cancelar.
- *
- * @param {boolean} jobFinished Indica se o processo terminou e deve disparar o e-mail de conclusão.
- * @returns {void}
  */
 function pararEresetarProcessamento(jobFinished = false) {
   const triggers = ScriptApp.getProjectTriggers();
@@ -158,10 +176,9 @@ function pararEresetarProcessamento(jobFinished = false) {
 }
 
 
+
 /**
  * Função executada pelo gatilho. Processa um lote de linhas por vez.
- *
- * @returns {void}
  */
 function processarLoteDeRelatorios() {
   const lock = LockService.getScriptLock();
@@ -198,9 +215,10 @@ function processarLoteDeRelatorios() {
 
     while (new Date() &lt; timeLimit &amp;&amp; currentRow &lt;= lastRow) {
       const [tipoJustica, processo] = sheet.getRange(currentRow, 3, 1, 2).getValues()[0];
-      
+      //agora verifica a classe
+      const classe = buscarClasse(processo);
       if (tipoJustica &amp;&amp; processo) {
-          const folderId = CONFIG.DRIVE_FOLDER_IDS[tipoJustica.toString().toUpperCase().trim()];
+          const folderId = CONFIG.DRIVE_FOLDER[classe.toString().trim()][tipoJustica.toString().trim()];
           if (!folderId) {
               const errorMsg = `Tipo de justiça inválido para o processo ${processo} na linha ${currentRow}`;
               Logger.log(errorMsg);
@@ -260,11 +278,6 @@ function processarLoteDeRelatorios() {
 
 /**
  * Cria o corpo HTML, converte para um Blob PDF e salva no Google Drive.
- *
- * @param {string} htmlContent Conteúdo HTML do relatório a ser convertido em PDF.
- * @param {string} baseFileName Nome base do arquivo PDF a ser salvo.
- * @param {string} folderId ID da pasta do Google Drive onde o PDF será armazenado.
- * @returns {boolean} Retorna true quando o PDF for salvo com sucesso e false em caso de erro.
  */
 function salvarRelatorioComoPDF(htmlContent, baseFileName, folderId) {
   try {
@@ -295,11 +308,6 @@ function salvarRelatorioComoPDF(htmlContent, baseFileName, folderId) {
 
 /**
  * Baixa um PDF de uma URL de exportação do Google Sheets e o salva no Google Drive.
- *
- * @param {string} url URL do PDF a ser baixado.
- * @param {string} processo Número ou identificador do processo associado ao relatório.
- * @param {string} folderId ID da pasta do Google Drive onde o arquivo será salvo.
- * @returns {void}
  */
 function salvarPdfDoLink(url, processo, folderId) {
   try {
@@ -320,9 +328,6 @@ function salvarPdfDoLink(url, processo, folderId) {
 
 /**
  * Busca os dados de um processo específico chamando o Web App.
- *
- * @param {string} processo Número ou identificador do processo a ser consultado.
- * @returns {Object|null} Objeto com os dados do processo, ou null em caso de erro.
  */
 function fetchDadosDoProcesso(processo) {
   try {
@@ -341,51 +346,13 @@ function fetchDadosDoProcesso(processo) {
 }
 
 // --- Funções de formatação de dados ---
-/**
- * Verifica se um valor está vazio.
- *
- * @param {*} valor Valor a ser avaliado.
- * @returns {boolean} Retorna true quando o valor é null, undefined ou string vazia.
- */
 function isValorVazio(valor) { return valor === null || valor === undefined || valor === ''; }
-/**
- * Formata um valor numérico para moeda em formato brasileiro.
- *
- * @param {number|string|null|undefined} valor Valor a ser formatado.
- * @returns {string} Valor formatado como moeda com duas casas decimais.
- */
 function formatarMoeda(valor) { if (isValorVazio(valor)) return '0,00'; const numero = typeof valor === 'number' ? valor : parseFloat(String(valor).replace(',', '.')); if (isNaN(numero)) return valor; return numero.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });}
-/**
- * Formata uma data em formato ISO para dd/MM/yyyy.
- *
- * @param {string|null|undefined} isoString Data em formato ISO ou string compatível.
- * @returns {string} Data formatada ou a string original em caso de falha.
- */
 function formatarData(isoString) { if (isValorVazio(isoString)) return ''; try { const data = new Date(isoString); return Utilities.formatDate(data, Session.getScriptTimeZone(), "dd/MM/yyyy"); } catch (e) { return isoString; } }
-/**
- * Converte uma data para um valor de duração em horas e minutos.
- *
- * @param {string|Date} dateString Data a ser convertida.
- * @returns {string} Texto no formato HH:MM.
- */
 function formatDurationFromDate(dateString) { try { const baseDate = new Date("1899-12-30T00:00:00Z"); const d = new Date(dateString); const diffMs = d.getTime() - baseDate.getTime(); const offsetSeconds = 11188; let totalSeconds = Math.floor(diffMs / 1000) - offsetSeconds; if (totalSeconds &lt; 0) totalSeconds = 0; const hours = Math.floor(totalSeconds / 3600); const minutes = Math.floor((totalSeconds % 3600) / 60); return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`; } catch(e) { return dateString; } }
-/**
- * Capitaliza a primeira letra de uma string.
- *
- * @param {string} string Texto a ser formatado.
- * @returns {string} Texto com a primeira letra em maiúscula.
- */
 function capitalizeFirstLetter(string) { if (!string) return ''; return string.charAt(0).toUpperCase() + string.slice(1); }
 
 // --- Funções de criação do HTML ---
-/**
- * Renderiza uma linha de tabela HTML para um campo do relatório.
- *
- * @param {string} chave Nome da chave do dado a ser exibido.
- * @param {*} valor Valor associado à chave.
- * @param {Object} data Objeto contendo os dados do processo.
- * @returns {string} String HTML contendo a linha da tabela.
- */
 function renderLinhaParaTabela(chave, valor, data) {
   const nomesAmigaveis = { processo: "Processo", nome: "Nome", entidade: "Entidade", saldo: "Saldo", penaOriginaria: "Pena Originária", penaPP: "Pena", contas: "Nº Contas", dataPP: "Consulta", juizo: "Juízo", classe: "Classe", relatorio: "Relatório", pena: "Pena", executado: "Executado", parcela: "Parcela", conta: "Conta" };
   let valorFormatado = valor;
@@ -393,12 +360,7 @@ function renderLinhaParaTabela(chave, valor, data) {
   const nomeExibicao = nomesAmigaveis[chave] || capitalizeFirstLetter(chave);
   return `&lt;tr>&lt;td>${nomeExibicao}&lt;/td>&lt;td>${valorFormatado}&lt;/td>&lt;/tr>`;
 }
-/**
- * Cria o HTML completo do relatório a partir dos dados do processo.
- *
- * @param {Object} data Objeto contendo os dados do processo.
- * @returns {string} HTML do relatório formatado.
- */
+
 function criarHtmlDoRelatorio(data) {
   const bloco1 = ['juizo', 'classe', 'processo', 'nome'];
   const bloco2 = ['pena', 'entidade', 'executado', 'relatorio'];
@@ -409,14 +371,7 @@ function criarHtmlDoRelatorio(data) {
   html += gerarImpresso("Dados da PP", bloco3, data);
   return html;
 }
-/**
- * Gera o bloco HTML de uma seção específica do relatório.
- *
- * @param {string} titulo Título da seção exibida no relatório.
- * @param {string[]} bloco Lista das chaves de dados a serem renderizadas.
- * @param {Object} data Objeto contendo os dados do processo.
- * @returns {string} HTML da seção formatada.
- */
+
 function gerarImpresso(titulo, bloco, data) {
   let linhas = '';
   const isBloco3 = (bloco.includes('saldo'));
@@ -446,13 +401,13 @@ function gerarImpresso(titulo, bloco, data) {
 </div>
 
 <nav>
-    <h2><a href="index.html">Home</a></h2><h3>Global</h3><ul><li><a href="global.html#capitalizeFirstLetter">capitalizeFirstLetter</a></li><li><a href="global.html#criarHtmlDoRelatorio">criarHtmlDoRelatorio</a></li><li><a href="global.html#fetchDadosDoProcesso">fetchDadosDoProcesso</a></li><li><a href="global.html#formatDurationFromDate">formatDurationFromDate</a></li><li><a href="global.html#formatarData">formatarData</a></li><li><a href="global.html#formatarMoeda">formatarMoeda</a></li><li><a href="global.html#gerarImpresso">gerarImpresso</a></li><li><a href="global.html#iniciarProcessamento">iniciarProcessamento</a></li><li><a href="global.html#isValorVazio">isValorVazio</a></li><li><a href="global.html#onOpen">onOpen</a></li><li><a href="global.html#pararEresetarProcessamento">pararEresetarProcessamento</a></li><li><a href="global.html#processarLoteDeRelatorios">processarLoteDeRelatorios</a></li><li><a href="global.html#renderLinhaParaTabela">renderLinhaParaTabela</a></li><li><a href="global.html#salvarPdfDoLink">salvarPdfDoLink</a></li><li><a href="global.html#salvarRelatorioComoPDF">salvarRelatorioComoPDF</a></li></ul>
+    <h2><a href="index.html">Home</a></h2><h3>Global</h3><ul><li><a href="global.html#buscarClasse">buscarClasse</a></li><li><a href="global.html#fetchDadosDoProcesso">fetchDadosDoProcesso</a></li><li><a href="global.html#iniciarProcessamento">iniciarProcessamento</a></li><li><a href="global.html#onOpen">onOpen</a></li><li><a href="global.html#pararEresetarProcessamento">pararEresetarProcessamento</a></li><li><a href="global.html#processarLoteDeRelatorios">processarLoteDeRelatorios</a></li><li><a href="global.html#salvarPdfDoLink">salvarPdfDoLink</a></li><li><a href="global.html#salvarRelatorioComoPDF">salvarRelatorioComoPDF</a></li></ul>
 </nav>
 
 <br class="clear">
 
 <footer>
-    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Wed Jul 15 2026 16:52:02 GMT-0300 (Horário Padrão de Brasília)
+    Documentation generated by <a href="https://github.com/jsdoc/jsdoc">JSDoc 4.0.5</a> on Mon Aug 17 2026 15:50:46 GMT-0300 (Horário Padrão de Brasília)
 </footer>
 
 <script> prettyPrint(); </script>
